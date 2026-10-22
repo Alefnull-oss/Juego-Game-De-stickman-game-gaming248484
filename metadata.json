@@ -1,0 +1,6 @@
+{
+  "name": "Stickman Dismount",
+  "description": "Juego de simulación física de muñeco de trapo (Ragdoll) tipo Stickman Dismounting y Turbo Dismount con rayos X, huesos rotos, vehículos y tienda.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
