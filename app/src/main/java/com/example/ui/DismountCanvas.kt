@@ -27,14 +27,18 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.BoneType
+import com.example.model.KineticBurstLine
 import com.example.model.ObstacleType
 import com.example.model.PlacedObstacle
+import com.example.model.Shockwave
+import com.example.model.SpeedStreak
 import com.example.model.VisualParticle
 import com.example.physics.DistanceConstraint
 import com.example.physics.Particle
@@ -67,6 +71,9 @@ fun DismountCanvas(
   phase: GamePhase,
   isSlowMoActive: Boolean,
   renderTick: Long,
+  shakeOffsetX: Float = 0f,
+  shakeOffsetY: Float = 0f,
+  shakeAngle: Float = 0f,
   onStickmanClicked: () -> Unit,
   modifier: Modifier = Modifier
 ) {
@@ -102,52 +109,73 @@ fun DismountCanvas(
       val canvasWidth = size.width
       val canvasHeight = size.height
 
-      // Camera centering strictly tracking the stickman
+      // Camera centering strictly tracking the stickman + dynamic trauma shake
       val (targetX, targetY) = simulation.getCameraTarget()
-      val offsetX = canvasWidth * 0.40f - targetX * zoom
-      val offsetY = canvasHeight * 0.50f - targetY * zoom
+      val offsetX = canvasWidth * 0.40f - targetX * zoom + shakeOffsetX
+      val offsetY = canvasHeight * 0.50f - targetY * zoom + shakeOffsetY
 
       fun toScreenX(worldX: Float) = worldX * zoom + offsetX
       fun toScreenY(worldY: Float) = worldY * zoom + offsetY
 
-      // 1. Draw Studio Background with Floating Cubes & Vignette
-      drawStudioBackground(canvasWidth, canvasHeight, offsetX, offsetY)
+      rotate(degrees = shakeAngle, pivot = Offset(canvasWidth * 0.5f, canvasHeight * 0.5f)) {
+        // 1. Draw Studio Background with Floating Cubes & Vignette
+        drawStudioBackground(canvasWidth, canvasHeight, offsetX, offsetY)
 
-      // 2. Draw Solid Grey Platforms and Terrain
-      drawSolidTerrain(simulation.terrain, ::toScreenX, ::toScreenY, zoom, canvasHeight)
+        // 2. Draw Solid Grey Platforms and Terrain
+        drawSolidTerrain(simulation.terrain, ::toScreenX, ::toScreenY, zoom, canvasHeight)
 
-      // 3. Draw Placed Obstacles
-      drawObstacles(simulation.obstacles, simulation.terrain, ::toScreenX, ::toScreenY, zoom)
+        // 3. Draw Placed Obstacles
+        drawObstacles(simulation.obstacles, simulation.terrain, ::toScreenX, ::toScreenY, zoom)
 
-      // 4. Draw Vehicle (if equipped)
-      simulation.vehicleBody?.let { vb ->
-        drawVehicle(vb, ::toScreenX, ::toScreenY, zoom)
-      }
+        // 4a. Draw Vehicle Rear & Interior Layer (Rear wheels, interior seat, background frame)
+        simulation.vehicleBody?.let { vb ->
+          drawVehicleRearLayer(vb, ::toScreenX, ::toScreenY, zoom)
+        }
 
-      // 5. Draw Stickman with Dark Silhouette & Internal X-Ray Glow
-      drawStickmanWithXRay(simulation.ragdoll, ::toScreenX, ::toScreenY, zoom)
+        // 5. Draw Stickman with Dark Silhouette & Internal X-Ray Glow (Sitting inside cockpit)
+        drawStickmanWithXRay(simulation.ragdoll, ::toScreenX, ::toScreenY, zoom)
 
-      // 6. Draw Directional Orange Push Arrow (during preparation)
-      if (phase == GamePhase.PREPARING || phase == GamePhase.CHARGING_POWER) {
-        val (pushX, pushY) = simulation.getPushJointPosition()
-        drawPushArrow(
-          originX = toScreenX(pushX),
-          originY = toScreenY(pushY),
-          angleDegrees = 20f,
-          scale = arrowPulse,
-          zoom = zoom
-        )
-      }
+        // 4b. Draw Vehicle Front/Exterior Layer (Cockpit sides, steering wheel, front panels, outer wheels)
+        simulation.vehicleBody?.let { vb ->
+          drawVehicleFrontLayer(vb, ::toScreenX, ::toScreenY, zoom)
+        }
 
-      // 7. Draw Visual Particles (fracture sparks, smoke, explosions)
-      drawParticles(simulation.particles, ::toScreenX, ::toScreenY, zoom)
+        // 4c. Draw Detached Vehicle Parts & Flying Scrap Debris
+        simulation.vehicleBody?.let { vb ->
+          drawVehicleDebris(vb, ::toScreenX, ::toScreenY, zoom)
+        }
 
-      // 8. Slow-Mo Vignette Tint
-      if (isSlowMoActive) {
-        drawRect(
-          color = FractureRed.copy(alpha = 0.08f),
-          size = size
-        )
+        // 6. Draw Directional Orange Push Arrow (during preparation)
+        if (phase == GamePhase.PREPARING || phase == GamePhase.CHARGING_POWER) {
+          val (pushX, pushY) = simulation.getPushJointPosition()
+          drawPushArrow(
+            originX = toScreenX(pushX),
+            originY = toScreenY(pushY),
+            angleDegrees = 20f,
+            scale = arrowPulse,
+            zoom = zoom
+          )
+        }
+
+        // 7. Draw Visual Particles (fracture sparks, smoke, explosions)
+        drawParticles(simulation.particles, ::toScreenX, ::toScreenY, zoom)
+
+        // 7b. Draw Speed Streaks
+        drawSpeedStreaks(simulation.speedStreaks, ::toScreenX, ::toScreenY, zoom)
+
+        // 7c. Draw Shockwaves
+        drawShockwaves(simulation.shockwaves, ::toScreenX, ::toScreenY, zoom)
+
+        // 7d. Draw Kinetic Burst Lines
+        drawKineticBursts(simulation.kineticBursts, ::toScreenX, ::toScreenY, zoom)
+
+        // 8. Slow-Mo Vignette Tint
+        if (isSlowMoActive) {
+          drawRect(
+            color = FractureRed.copy(alpha = 0.08f),
+            size = size
+          )
+        }
       }
     }
 
@@ -419,57 +447,393 @@ private fun DrawScope.drawPushArrow(
   drawPath(path = arrowPath, color = PushArrowOrange)
 }
 
-private fun DrawScope.drawVehicle(
+private fun DrawScope.drawVehicleRearLayer(
   vb: VehicleBody,
   toX: (Float) -> Float,
   toY: (Float) -> Float,
   zoom: Float
 ) {
-  if (vb.particles.isEmpty()) return
+  if (vb.particles.isEmpty() || vb.vehicle.wheelCount == 0) return
 
-  // Chassis Struts
-  for (c in vb.constraints) {
-    drawLine(
-      color = Color(0xFF2C2F33),
-      start = Offset(toX(c.p1.x), toY(c.p1.y)),
-      end = Offset(toX(c.p2.x), toY(c.p2.y)),
-      strokeWidth = 4f * zoom,
-      cap = StrokeCap.Round
-    )
+  val seatX = toX(vb.chassisSeat.x)
+  val seatY = toY(vb.chassisSeat.y)
+  val rearX = toX(vb.chassisRear.x)
+  val rearY = toY(vb.chassisRear.y)
+  val floorX = toX(vb.chassisFloor.x)
+  val floorY = toY(vb.chassisFloor.y)
+
+  // 1. Interior Cockpit Shadow / Backdrop
+  val cockpitBackdrop = Path().apply {
+    moveTo(rearX, rearY)
+    lineTo(seatX, seatY)
+    lineTo(floorX, floorY)
+    close()
   }
+  drawPath(path = cockpitBackdrop, color = Color(0x99181A1D))
 
-  // Wheels
-  if (vb.vehicle.wheelCount > 0 && vb.particles.size >= 6) {
-    drawWheel(vb.wheelFront, toX, toY, zoom)
-    drawWheel(vb.wheelRear, toX, toY, zoom)
+  // 2. Interior Seat Backrest
+  drawLine(
+    color = Color(0xFF1E2024),
+    start = Offset(seatX - 4f * zoom, seatY - 14f * zoom),
+    end = Offset(seatX, seatY + 4f * zoom),
+    strokeWidth = 6f * zoom,
+    cap = StrokeCap.Round
+  )
+
+  // 3. Interior Structural Frame Struts (Behind driver)
+  drawLine(
+    color = Color(0xFF2C2F33),
+    start = Offset(rearX, rearY),
+    end = Offset(floorX, floorY),
+    strokeWidth = 4f * zoom,
+    cap = StrokeCap.Round
+  )
+  drawLine(
+    color = Color(0xFF3A3E45),
+    start = Offset(rearX, rearY),
+    end = Offset(seatX, seatY),
+    strokeWidth = 3.5f * zoom,
+    cap = StrokeCap.Round
+  )
+
+  // 4. Rear Wheel (Inner side / back layer)
+  if (!vb.isRearWheelDetached) {
+    drawWheelDetailed(
+      cx = toX(vb.wheelRear.x),
+      cy = toY(vb.wheelRear.y),
+      radius = vb.vehicle.wheelRadius * zoom,
+      rotationAngle = vb.rearWheelAngle,
+      rimColor = Color(vb.vehicle.secondaryColorHex),
+      zoom = zoom,
+      isInnerWheel = true
+    )
   }
 }
 
-private fun DrawScope.drawWheel(
-  wheel: Particle,
+private fun DrawScope.drawVehicleFrontLayer(
+  vb: VehicleBody,
   toX: (Float) -> Float,
   toY: (Float) -> Float,
   zoom: Float
 ) {
-  val cx = toX(wheel.x)
-  val cy = toY(wheel.y)
-  val r = wheel.radius * zoom
+  if (vb.particles.isEmpty() || vb.vehicle.wheelCount == 0) return
 
-  // Tire
+  val frontX = toX(vb.chassisFront.x)
+  val frontY = toY(vb.chassisFront.y)
+  val steerX = toX(vb.steeringCol.x)
+  val steerY = toY(vb.steeringCol.y)
+  val floorX = toX(vb.chassisFloor.x)
+  val floorY = toY(vb.chassisFloor.y)
+  val seatX = toX(vb.chassisSeat.x)
+  val seatY = toY(vb.chassisSeat.y)
+  val topX = toX(vb.chassisTop.x)
+  val topY = toY(vb.chassisTop.y)
+  val rearX = toX(vb.chassisRear.x)
+  val rearY = toY(vb.chassisRear.y)
+
+  val primaryCol = Color(vb.vehicle.primaryColorHex)
+  val secondaryCol = Color(vb.vehicle.secondaryColorHex)
+
+  when (vb.vehicle.id) {
+    "shopping_cart" -> {
+      // Wire mesh basket sides
+      val basketPath = Path().apply {
+        moveTo(frontX, frontY - 10f * zoom)
+        lineTo(frontX, frontY + 8f * zoom)
+        lineTo(rearX, rearY + 6f * zoom)
+        lineTo(steerX, steerY - 6f * zoom)
+        close()
+      }
+      drawPath(path = basketPath, color = primaryCol.copy(alpha = 0.25f))
+
+      // Wire grid lines
+      val gridSteps = 5
+      for (i in 1..gridSteps) {
+        val t = i.toFloat() / (gridSteps + 1)
+        val x1 = frontX * (1 - t) + rearX * t
+        val y1 = (frontY - 10f * zoom) * (1 - t) + (steerY - 6f * zoom) * t
+        val x2 = frontX * (1 - t) + rearX * t
+        val y2 = (frontY + 8f * zoom) * (1 - t) + (rearY + 6f * zoom) * t
+        drawLine(
+          color = primaryCol,
+          start = Offset(x1, y1),
+          end = Offset(x2, y2),
+          strokeWidth = 1.8f * zoom
+        )
+      }
+
+      // Upper rim bar
+      drawLine(
+        color = Color.White.copy(alpha = 0.8f),
+        start = Offset(frontX, frontY - 10f * zoom),
+        end = Offset(steerX, steerY - 6f * zoom),
+        strokeWidth = 3f * zoom,
+        cap = StrokeCap.Round
+      )
+
+      // Red Plastic Handlebar (In front of stickman's hands)
+      drawLine(
+        color = secondaryCol,
+        start = Offset(steerX - 4f * zoom, steerY - 8f * zoom),
+        end = Offset(steerX + 6f * zoom, steerY - 4f * zoom),
+        strokeWidth = 5.5f * zoom,
+        cap = StrokeCap.Round
+      )
+    }
+
+    "muscle_car" -> {
+      // Car Body Shell (Sleek muscle car front hood and side sill)
+      val bodyPath = Path().apply {
+        moveTo(frontX + 6f * zoom, frontY + 4f * zoom)
+        lineTo(frontX - 8f * zoom, frontY - 8f * zoom)
+        lineTo(steerX, steerY - 4f * zoom)
+        if (!vb.isRoofCrushed) {
+          lineTo(topX, topY)
+          lineTo(rearX, rearY - 8f * zoom)
+        } else {
+          // Crushed crumpled roof line
+          lineTo(seatX, seatY - 6f * zoom)
+          lineTo(rearX, rearY + 2f * zoom)
+        }
+        lineTo(rearX - 4f * zoom, rearY + 6f * zoom)
+        lineTo(floorX, floorY + 4f * zoom)
+        close()
+      }
+      drawPath(path = bodyPath, color = primaryCol)
+
+      // White Racing Stripes
+      drawLine(
+        color = secondaryCol,
+        start = Offset(frontX - 6f * zoom, frontY - 6f * zoom),
+        end = Offset(steerX, steerY - 3f * zoom),
+        strokeWidth = 3f * zoom
+      )
+
+      // Windshield A-pillar
+      if (!vb.isRoofCrushed) {
+        drawLine(
+          color = Color(0x66FFFFFF),
+          start = Offset(steerX, steerY - 4f * zoom),
+          end = Offset(topX, topY),
+          strokeWidth = 2.5f * zoom
+        )
+      }
+
+      // Steering wheel in front of rider
+      drawCircle(
+        color = Color(0xFF1E2024),
+        radius = 5.5f * zoom,
+        center = Offset(steerX, steerY),
+        style = Stroke(width = 2.5f * zoom)
+      )
+
+      // Front Headlight Glow
+      drawCircle(
+        color = CashGold,
+        radius = 4f * zoom,
+        center = Offset(frontX + 4f * zoom, frontY - 2f * zoom)
+      )
+    }
+
+    "stunt_bike" -> {
+      // Telescopic Front Fork down to front wheel
+      if (!vb.isFrontWheelDetached) {
+        drawLine(
+          color = Color(0xFF8B949E),
+          start = Offset(steerX, steerY),
+          end = Offset(toX(vb.wheelFront.x), toY(vb.wheelFront.y)),
+          strokeWidth = 3.5f * zoom,
+          cap = StrokeCap.Round
+        )
+      }
+
+      // Fuel tank
+      val tankPath = Path().apply {
+        moveTo(steerX, steerY)
+        lineTo(seatX, seatY - 4f * zoom)
+        lineTo(floorX, floorY)
+        close()
+      }
+      drawPath(path = tankPath, color = primaryCol)
+
+      // Handlebars and grips
+      drawLine(
+        color = secondaryCol,
+        start = Offset(steerX - 3f * zoom, steerY - 6f * zoom),
+        end = Offset(steerX + 5f * zoom, steerY - 2f * zoom),
+        strokeWidth = 4.5f * zoom,
+        cap = StrokeCap.Round
+      )
+    }
+
+    "scooter" -> {
+      // Scooter Deck
+      drawLine(
+        color = primaryCol,
+        start = Offset(rearX, rearY + 2f * zoom),
+        end = Offset(floorX + 10f * zoom, floorY + 2f * zoom),
+        strokeWidth = 5f * zoom,
+        cap = StrokeCap.Round
+      )
+
+      // Steering stem tube
+      drawLine(
+        color = primaryCol,
+        start = Offset(floorX + 8f * zoom, floorY + 2f * zoom),
+        end = Offset(steerX, steerY),
+        strokeWidth = 4f * zoom,
+        cap = StrokeCap.Round
+      )
+
+      // Cyan accent line
+      drawLine(
+        color = secondaryCol,
+        start = Offset(steerX, steerY),
+        end = Offset(steerX + 4f * zoom, steerY - 2f * zoom),
+        strokeWidth = 4f * zoom,
+        cap = StrokeCap.Round
+      )
+    }
+
+    else -> {
+      // Default / Rocket Sled
+      val sledPath = Path().apply {
+        moveTo(frontX + 8f * zoom, frontY)
+        lineTo(steerX, steerY - 4f * zoom)
+        lineTo(rearX, rearY - 4f * zoom)
+        lineTo(floorX, floorY + 4f * zoom)
+        close()
+      }
+      drawPath(path = sledPath, color = primaryCol)
+
+      // Booster flame/thruster rim
+      drawCircle(
+        color = secondaryCol,
+        radius = 5f * zoom,
+        center = Offset(rearX - 4f * zoom, rearY)
+      )
+
+      // Control joystick
+      drawLine(
+        color = Color.White,
+        start = Offset(steerX, steerY + 4f * zoom),
+        end = Offset(steerX, steerY - 6f * zoom),
+        strokeWidth = 3.5f * zoom,
+        cap = StrokeCap.Round
+      )
+    }
+  }
+
+  // Outer Front Wheel
+  if (!vb.isFrontWheelDetached) {
+    drawWheelDetailed(
+      cx = toX(vb.wheelFront.x),
+      cy = toY(vb.wheelFront.y),
+      radius = vb.vehicle.wheelRadius * zoom,
+      rotationAngle = vb.frontWheelAngle,
+      rimColor = secondaryCol,
+      zoom = zoom,
+      isInnerWheel = false
+    )
+  }
+
+  // If front is crushed, draw crumpled impact marks
+  if (vb.isFrontCrushed) {
+    drawLine(
+      color = FractureRed,
+      start = Offset(frontX - 6f * zoom, frontY - 6f * zoom),
+      end = Offset(frontX + 4f * zoom, frontY + 6f * zoom),
+      strokeWidth = 2.5f * zoom
+    )
+  }
+}
+
+private fun DrawScope.drawVehicleDebris(
+  vb: VehicleBody,
+  toX: (Float) -> Float,
+  toY: (Float) -> Float,
+  zoom: Float
+) {
+  if (vb.detachedDebris.isEmpty()) return
+
+  for (deb in vb.detachedDebris) {
+    val cx = toX(deb.particle.x)
+    val cy = toY(deb.particle.y)
+
+    if (deb.isWheel) {
+      drawWheelDetailed(
+        cx = cx,
+        cy = cy,
+        radius = deb.wheelRadius * zoom,
+        rotationAngle = deb.rotationAngle,
+        rimColor = Color(deb.colorHex),
+        zoom = zoom,
+        isInnerWheel = false
+      )
+    } else {
+      // Rotating scrap metal shard
+      val s = deb.size * zoom
+      rotate(degrees = Math.toDegrees(deb.rotationAngle.toDouble()).toFloat(), pivot = Offset(cx, cy)) {
+        val shardPath = Path().apply {
+          moveTo(cx - s * 0.6f, cy - s * 0.3f)
+          lineTo(cx + s * 0.7f, cy - s * 0.5f)
+          lineTo(cx + s * 0.4f, cy + s * 0.6f)
+          lineTo(cx - s * 0.5f, cy + s * 0.4f)
+          close()
+        }
+        drawPath(path = shardPath, color = Color(deb.colorHex))
+        drawPath(path = shardPath, color = Color.White.copy(alpha = 0.4f), style = Stroke(width = 1.5f * zoom))
+      }
+    }
+  }
+}
+
+private fun DrawScope.drawWheelDetailed(
+  cx: Float,
+  cy: Float,
+  radius: Float,
+  rotationAngle: Float,
+  rimColor: Color,
+  zoom: Float,
+  isInnerWheel: Boolean
+) {
+  val tireColor = if (isInnerWheel) Color(0xFF181A1D) else Color(0xFF232528)
+  val spokeColor = if (isInnerWheel) Color(0xFF6B7280) else Color(0xFFE5E7EB)
+
+  // Outer Tire Rubber
   drawCircle(
-    color = Color(0xFF232528),
-    radius = r,
-    center = Offset(cx, cy),
-    style = Stroke(width = 4f * zoom)
+    color = tireColor,
+    radius = radius,
+    center = Offset(cx, cy)
   )
 
-  // Spoke
-  val spokeAngle = wheel.x * 0.08f
-  drawLine(
-    color = Color.White,
-    start = Offset(cx - cos(spokeAngle) * r * 0.8f, cy - sin(spokeAngle) * r * 0.8f),
-    end = Offset(cx + cos(spokeAngle) * r * 0.8f, cy + sin(spokeAngle) * r * 0.8f),
-    strokeWidth = 2.5f * zoom
+  // Inner Rim
+  drawCircle(
+    color = rimColor.copy(alpha = if (isInnerWheel) 0.5f else 0.85f),
+    radius = radius * 0.65f,
+    center = Offset(cx, cy),
+    style = Stroke(width = 2.5f * zoom)
+  )
+
+  // Rotating spokes (4 cross spokes)
+  for (i in 0 until 4) {
+    val angle = rotationAngle + (i * Math.PI.toFloat() / 2f)
+    val xOffset = cos(angle) * radius * 0.82f
+    val yOffset = sin(angle) * radius * 0.82f
+    drawLine(
+      color = spokeColor,
+      start = Offset(cx, cy),
+      end = Offset(cx + xOffset, cy + yOffset),
+      strokeWidth = 2f * zoom,
+      cap = StrokeCap.Round
+    )
+  }
+
+  // Wheel center hub
+  drawCircle(
+    color = if (isInnerWheel) Color(0xFF374151) else Color.White,
+    radius = 2.5f * zoom,
+    center = Offset(cx, cy)
   )
 }
 
@@ -579,6 +943,78 @@ private fun DrawScope.drawParticles(
       color = color,
       radius = p.size * zoom * (0.5f + 0.5f * alpha),
       center = Offset(toX(p.x), toY(p.y))
+    )
+  }
+}
+
+private fun DrawScope.drawShockwaves(
+  shockwaves: List<Shockwave>,
+  toX: (Float) -> Float,
+  toY: (Float) -> Float,
+  zoom: Float
+) {
+  for (sw in shockwaves) {
+    val alpha = sw.life.coerceIn(0f, 1f)
+    if (alpha <= 0.01f) continue
+    val center = Offset(toX(sw.x), toY(sw.y))
+    val r = sw.radius * zoom
+    // Sharp technical shockwave ring
+    drawCircle(
+      color = Color(sw.colorHex).copy(alpha = alpha * 0.85f),
+      radius = r,
+      center = center,
+      style = Stroke(width = max(1.5f, 3.5f * alpha * zoom))
+    )
+    if (r > 12f * zoom) {
+      drawCircle(
+        color = Color(sw.colorHex).copy(alpha = alpha * 0.4f),
+        radius = r * 0.65f,
+        center = center,
+        style = Stroke(width = max(1f, 1.8f * alpha * zoom))
+      )
+    }
+  }
+}
+
+private fun DrawScope.drawKineticBursts(
+  bursts: List<KineticBurstLine>,
+  toX: (Float) -> Float,
+  toY: (Float) -> Float,
+  zoom: Float
+) {
+  for (burst in bursts) {
+    val progress = (burst.life / burst.maxLife).coerceIn(0f, 1f)
+    if (progress <= 0.01f) continue
+    val p1 = Offset(toX(burst.startX), toY(burst.startY))
+    val p2 = Offset(toX(burst.endX), toY(burst.endY))
+    drawLine(
+      color = Color.White.copy(alpha = progress),
+      start = p1,
+      end = p2,
+      strokeWidth = burst.strokeWidth * zoom * progress,
+      cap = StrokeCap.Round
+    )
+  }
+}
+
+private fun DrawScope.drawSpeedStreaks(
+  streaks: List<SpeedStreak>,
+  toX: (Float) -> Float,
+  toY: (Float) -> Float,
+  zoom: Float
+) {
+  for (s in streaks) {
+    val alpha = s.life.coerceIn(0f, 1f) * 0.65f
+    if (alpha <= 0.01f) continue
+    val sx = toX(s.x)
+    val sy = toY(s.y)
+    val len = s.length * zoom
+    drawLine(
+      color = Color.White.copy(alpha = alpha),
+      start = Offset(sx - len, sy),
+      end = Offset(sx, sy),
+      strokeWidth = 2f * zoom,
+      cap = StrokeCap.Round
     )
   }
 }

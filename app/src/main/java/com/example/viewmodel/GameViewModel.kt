@@ -7,6 +7,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.audio.GameSoundEngine
 import com.example.data.GameRepository
 import com.example.model.BoneStatus
 import com.example.model.BoneType
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sin
+import kotlin.random.Random
 
 enum class GamePhase {
   PREPARING,
@@ -58,6 +60,9 @@ data class GameUiState(
   val isSlowMoActive: Boolean = false,
   val timeDilation: Float = 1.0f,
   val pushJointIndex: Int = 0, // 0: Espalda/Torso, 1: Cabeza, 2: Pelvis, 3: Piernas
+  val shakeOffsetX: Float = 0f,
+  val shakeOffsetY: Float = 0f,
+  val shakeAngle: Float = 0f,
   val renderTick: Long = 0L,
   val crashReport: CrashReport? = null,
   val availableStages: List<Stage> = Stage.DEFAULT_LIST,
@@ -73,6 +78,8 @@ class GameViewModel(
   private val _uiState = MutableStateFlow(GameUiState())
   val uiState: StateFlow<GameUiState> = _uiState.asStateFlow()
 
+  val soundEngine = GameSoundEngine()
+
   val simulation: RagdollSimulation = RagdollSimulation(
     stage = Stage.STAIRS,
     vehicle = Vehicle.SHOPPING_CART,
@@ -82,6 +89,9 @@ class GameViewModel(
   private var loopJob: Job? = null
   private var powerChargingJob: Job? = null
   private var slowMoJob: Job? = null
+
+  private var trauma: Float = 0f
+  private var hitStopFrames: Int = 0
 
   private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
     val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -98,8 +108,23 @@ class GameViewModel(
   }
 
   private fun setupSimulationCallbacks() {
+    simulation.onImpactAudio = { type, intensity ->
+      when (type) {
+        "bone_crunch" -> soundEngine.playBoneCrunch()
+        "thud" -> soundEngine.playThud(intensity)
+        "metallic_clang" -> soundEngine.playMetallicClang()
+        "explosion" -> soundEngine.playExplosion()
+        "whoosh" -> soundEngine.playWhoosh()
+      }
+    }
+
     simulation.onBoneBroken = { boneType, speed ->
-      triggerHaptic(60, 200)
+      triggerHaptic(75, 255)
+      addTrauma(0.75f)
+      // Only apply 1-frame micro-pause outside of slow-mo so slow-mo never halts the stickman
+      if (!simulation.isSlowMoActive && hitStopFrames <= 0) {
+        hitStopFrames = 1
+      }
       _uiState.update { state ->
         val bonePoints = boneType.pointValue + (speed * 40f).toInt()
         val newScore = state.score + bonePoints
@@ -112,12 +137,14 @@ class GameViewModel(
       }
     }
 
-    simulation.onSevereImpact = { impactForce, boneType ->
+    simulation.onSevereImpact = { impactForce, _ ->
+      addTrauma((impactForce / 24f).coerceIn(0.35f, 0.9f))
       triggerAutoSlowMotion()
     }
 
     simulation.onObstacleTriggered = { obsType ->
       triggerHaptic(120, 255)
+      addTrauma(0.85f)
       triggerAutoSlowMotion()
       _uiState.update { state ->
         state.copy(score = state.score + obsType.bonusPoints)
@@ -126,11 +153,16 @@ class GameViewModel(
 
     simulation.onRiderEjected = {
       triggerHaptic(90, 220)
+      addTrauma(0.6f)
       triggerAutoSlowMotion()
       _uiState.update { state ->
         state.copy(score = state.score + 1500)
       }
     }
+  }
+
+  fun addTrauma(amount: Float) {
+    trauma = (trauma + amount).coerceAtMost(1.0f)
   }
 
   fun triggerAutoSlowMotion() {
@@ -191,7 +223,19 @@ class GameViewModel(
         lastTime = now
 
         if (_uiState.value.phase == GamePhase.SIMULATING && !_uiState.value.isPaused) {
-          simulation.update(dt.coerceIn(0.005f, 0.033f))
+          if (hitStopFrames > 0) {
+            hitStopFrames--
+            // Freeze physics calculation during hit-stop
+          } else {
+            simulation.update(dt.coerceIn(0.005f, 0.033f))
+          }
+
+          // Calculate trauma screen shake
+          trauma = (trauma - 0.035f).coerceAtLeast(0f)
+          val shakeStrength = trauma * trauma
+          val shakeX = if (shakeStrength > 0.01f) (Random.nextFloat() * 2f - 1f) * shakeStrength * 26f else 0f
+          val shakeY = if (shakeStrength > 0.01f) (Random.nextFloat() * 2f - 1f) * shakeStrength * 26f else 0f
+          val shakeRot = if (shakeStrength > 0.01f) (Random.nextFloat() * 2f - 1f) * shakeStrength * 3.2f else 0f
 
           val curSpeed = (simulation.vehicleBody?.speed ?: simulation.ragdoll.averageSpeed) * 14.4f
           _uiState.update { state ->
@@ -200,6 +244,9 @@ class GameViewModel(
               maxSpeedKmh = simulation.maxSpeed,
               airTimeSeconds = simulation.airTimeSeconds,
               somersaultsCount = simulation.ragdoll.somersaultCount,
+              shakeOffsetX = shakeX,
+              shakeOffsetY = shakeY,
+              shakeAngle = shakeRot,
               renderTick = state.renderTick + 1
             )
           }
@@ -208,7 +255,15 @@ class GameViewModel(
             onSimulationFinished()
           }
         } else {
-          _uiState.update { it.copy(renderTick = it.renderTick + 1) }
+          trauma = 0f
+          _uiState.update {
+            it.copy(
+              shakeOffsetX = 0f,
+              shakeOffsetY = 0f,
+              shakeAngle = 0f,
+              renderTick = it.renderTick + 1
+            )
+          }
         }
 
         delay(16) // ~60 FPS
@@ -253,7 +308,7 @@ class GameViewModel(
     val next = (simulation.pushJointIndex + 1) % 4
     simulation.pushJointIndex = next
     _uiState.update { it.copy(pushJointIndex = next) }
-    triggerHaptic(20, 100)
+    triggerHaptic(25, 120)
   }
 
   fun togglePause() {
@@ -289,6 +344,7 @@ class GameViewModel(
     }
     simulation.timeDilation = 1.0f
     simulation.launch(state.power, state.launchAngleDegrees)
+    soundEngine.playWhoosh()
     triggerHaptic(100, 255)
   }
 
@@ -335,7 +391,10 @@ class GameViewModel(
         bestScore = newBest,
         crashReport = report,
         isSlowMoActive = false,
-        timeDilation = 1.0f
+        timeDilation = 1.0f,
+        shakeOffsetX = 0f,
+        shakeOffsetY = 0f,
+        shakeAngle = 0f
       )
     }
     triggerHaptic(180, 255)
@@ -344,6 +403,8 @@ class GameViewModel(
   fun resetRun() {
     slowMoJob?.cancel()
     powerChargingJob?.cancel()
+    trauma = 0f
+    hitStopFrames = 0
     simulation.timeDilation = 1.0f
     simulation.reset()
     _uiState.update {
@@ -359,7 +420,10 @@ class GameViewModel(
         crashReport = null,
         isPaused = false,
         isSlowMoActive = false,
-        timeDilation = 1.0f
+        timeDilation = 1.0f,
+        shakeOffsetX = 0f,
+        shakeOffsetY = 0f,
+        shakeAngle = 0f
       )
     }
   }

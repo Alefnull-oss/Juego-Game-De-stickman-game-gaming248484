@@ -16,7 +16,11 @@ data class Vehicle(
   val riderSeatOffsetX: Float,
   val riderSeatOffsetY: Float,
   val description: String,
-  val ejectForceThreshold: Float // Force needed to throw the stickman off the seat
+  val ejectForceThreshold: Float, // Force needed to throw the stickman off the seat
+  val wheelBreakThreshold: Float = 14f,
+  val roofBreakThreshold: Float = 16f,
+  val primaryColorHex: Long = 0xFF4A4D52L,
+  val secondaryColorHex: Long = 0xFFFF9500L
 ) {
   companion object {
     val ON_FOOT = Vehicle(
@@ -35,7 +39,11 @@ data class Vehicle(
       riderSeatOffsetX = 0f,
       riderSeatOffsetY = 0f,
       description = "Desmonte puro a cuerpo descubierto. Sensibilidad máxima de impacto.",
-      ejectForceThreshold = 0f
+      ejectForceThreshold = 0f,
+      wheelBreakThreshold = 0f,
+      roofBreakThreshold = 0f,
+      primaryColorHex = 0x00000000L,
+      secondaryColorHex = 0x00000000L
     )
 
     val SHOPPING_CART = Vehicle(
@@ -54,7 +62,11 @@ data class Vehicle(
       riderSeatOffsetX = 4f,
       riderSeatOffsetY = -10f,
       description = "Cesta de alambre inestable. El piloto sale despedido a la menor irregularidad.",
-      ejectForceThreshold = 9f
+      ejectForceThreshold = 9f,
+      wheelBreakThreshold = 8.5f,
+      roofBreakThreshold = 9f,
+      primaryColorHex = 0xFFADB5BDL, // Zinc wire grid
+      secondaryColorHex = 0xFFFF3B30L // Red plastic handle
     )
 
     val ELECTRIC_SCOOTER = Vehicle(
@@ -73,7 +85,11 @@ data class Vehicle(
       riderSeatOffsetX = 0f,
       riderSeatOffsetY = -24f,
       description = "Rápido y con centro de gravedad alto. Provoca caídas frontales catastróficas.",
-      ejectForceThreshold = 10f
+      ejectForceThreshold = 10f,
+      wheelBreakThreshold = 10.5f,
+      roofBreakThreshold = 11f,
+      primaryColorHex = 0xFF212529L, // Matte black
+      secondaryColorHex = 0xFF0A84FFL // Cyan electric accent
     )
 
     val STUNT_BIKE = Vehicle(
@@ -92,7 +108,11 @@ data class Vehicle(
       riderSeatOffsetX = -5f,
       riderSeatOffsetY = -20f,
       description = "Gran inercia y velocidad de rampa. Eyección a alta velocidad garantizada.",
-      ejectForceThreshold = 14f
+      ejectForceThreshold = 14f,
+      wheelBreakThreshold = 15f,
+      roofBreakThreshold = 14f,
+      primaryColorHex = 0xFFFFD60AL, // Racing yellow
+      secondaryColorHex = 0xFF1C1D21L // Dark carbon
     )
 
     val MUSCLE_CAR = Vehicle(
@@ -111,7 +131,11 @@ data class Vehicle(
       riderSeatOffsetX = -8f,
       riderSeatOffsetY = -18f,
       description = "Pesado como un yunque. Aplasta obstáculos antes de destrozar al conductor.",
-      ejectForceThreshold = 22f
+      ejectForceThreshold = 22f,
+      wheelBreakThreshold = 20f,
+      roofBreakThreshold = 17f,
+      primaryColorHex = 0xFFFF3B30L, // Muscle crimson
+      secondaryColorHex = 0xFFF8F9FAL // White racing stripes
     )
 
     val ROCKET_SLED = Vehicle(
@@ -130,7 +154,11 @@ data class Vehicle(
       riderSeatOffsetX = -12f,
       riderSeatOffsetY = -14f,
       description = "Aceleración sobrehumana con propulsión supersónica.",
-      ejectForceThreshold = 18f
+      ejectForceThreshold = 18f,
+      wheelBreakThreshold = 18f,
+      roofBreakThreshold = 22f,
+      primaryColorHex = 0xFFFF9500L, // Rocket booster orange
+      secondaryColorHex = 0xFF30D158L // Turbo neon green
     )
 
     val DEFAULT_LIST = listOf(

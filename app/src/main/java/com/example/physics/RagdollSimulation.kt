@@ -2,12 +2,16 @@ package com.example.physics
 
 import com.example.model.BoneType
 import com.example.model.DismountPose
+import com.example.model.KineticBurstLine
 import com.example.model.ObstacleType
 import com.example.model.PlacedObstacle
+import com.example.model.Shockwave
 import com.example.model.SlopeType
+import com.example.model.SpeedStreak
 import com.example.model.Stage
 import com.example.model.Vehicle
 import com.example.model.VisualParticle
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
@@ -23,6 +27,11 @@ class RagdollSimulation(
   val terrain = mutableListOf<TerrainSegment>()
   val obstacles = mutableListOf<PlacedObstacle>()
   val particles = mutableListOf<VisualParticle>()
+  val shockwaves = mutableListOf<Shockwave>()
+  val kineticBursts = mutableListOf<KineticBurstLine>()
+  val speedStreaks = mutableListOf<SpeedStreak>()
+
+  var onImpactAudio: ((String, Float) -> Unit)? = null
 
   lateinit var ragdoll: RagdollBody
   var vehicleBody: VehicleBody? = null
@@ -37,6 +46,8 @@ class RagdollSimulation(
   var maxSpeed: Float = 0f
 
   var timeDilation: Float = 1.0f
+  private var lastTimeDilation: Float = 1.0f
+  val isSlowMoActive: Boolean get() = timeDilation < 0.95f
   var pushJointIndex: Int = 0 // 0: Torso/Back, 1: Head, 2: Pelvis, 3: Knees/Feet
 
   var cameraX: Float = 120f
@@ -169,7 +180,12 @@ class RagdollSimulation(
     simulationTimeSeconds = 0f
     airTimeSeconds = 0f
     maxSpeed = 0f
+    timeDilation = 1.0f
+    lastTimeDilation = 1.0f
     particles.clear()
+    shockwaves.clear()
+    kineticBursts.clear()
+    speedStreaks.clear()
 
     obstacles.forEach { it.isTriggered = false }
 
@@ -178,7 +194,8 @@ class RagdollSimulation(
       vehicleBody = vBody
       val riderX = spawnX + vehicle.riderSeatOffsetX
       val riderY = spawnY + vehicle.riderSeatOffsetY
-      ragdoll = RagdollBody(riderX, riderY, pose)
+      val effectivePose = if (pose == DismountPose.STANDING) DismountPose.SITTING else pose
+      ragdoll = RagdollBody(riderX, riderY, effectivePose)
       vBody.attachRider(ragdoll)
     } else {
       vehicleBody = null
@@ -190,6 +207,9 @@ class RagdollSimulation(
   }
 
   fun getPushJointPosition(): Pair<Float, Float> {
+    vehicleBody?.let { vb ->
+      return Pair(vb.chassisRear.x - 14f, vb.chassisRear.y)
+    }
     return when (pushJointIndex) {
       1 -> Pair(ragdoll.head.x - 8f, ragdoll.head.y) // Head
       2 -> Pair(ragdoll.pelvis.x - 8f, ragdoll.pelvis.y) // Pelvis
@@ -239,19 +259,27 @@ class RagdollSimulation(
   fun update(dtSeconds: Float) {
     if (!isSimulating) return
 
-    val effectiveDt = dtSeconds * timeDilation
+    val currentDilation = timeDilation.coerceIn(0.15f, 1.0f)
+    if (abs(currentDilation - lastTimeDilation) > 0.001f) {
+      val ratio = currentDilation / lastTimeDilation
+      ragdoll.particles.forEach { it.scaleDisplacement(ratio) }
+      vehicleBody?.particles?.forEach { it.scaleDisplacement(ratio) }
+      lastTimeDilation = currentDilation
+    }
+
+    val effectiveDt = dtSeconds * currentDilation
     simulationTimeSeconds += effectiveDt
     val dtSub = (effectiveDt / subSteps) * 60f // Normalized to ~1.0 per frame
 
     for (step in 0 until subSteps) {
       // 1. Update ragdoll particles
       for (p in ragdoll.particles) {
-        p.update(dtSub, gravity)
+        p.update(dtSub, gravity, currentDilation)
       }
 
       // 2. Update vehicle particles
       vehicleBody?.particles?.forEach { p ->
-        p.update(dtSub, gravity)
+        p.update(dtSub, gravity, currentDilation)
       }
 
       // 3. Solve ragdoll skeletal constraints with bone fracture detection
@@ -259,15 +287,23 @@ class RagdollSimulation(
         c.solve(onBoneBroken = { boneType, speed ->
           ragdoll.breakBone(boneType, speed)
           onBoneBroken?.invoke(boneType, speed)
-          onSevereImpact?.invoke(speed, boneType)
+          val trueImpact = speed / currentDilation
+          onSevereImpact?.invoke(trueImpact, boneType)
+          onImpactAudio?.invoke("bone_crunch", 1.0f)
           createFractureParticles(c.p1.x, c.p1.y)
+          addShockwave(c.p1.x, c.p1.y, maxRadius = 75f, colorHex = 0xFFFF3B30L)
+          addKineticBurst(c.p1.x, c.p1.y, count = 10, length = 32f)
         })
       }
 
       // 4. Solve vehicle constraints and rider attachment
       vehicleBody?.let { vb ->
-        for (c in vb.constraints) {
-          c.solve()
+        vb.solveConstraints { partName, px, py ->
+          onImpactAudio?.invoke("metallic_clang", 1.0f)
+          createSparks(px, py, count = 14)
+          addShockwave(px, py, maxRadius = 70f, colorHex = 0xFFFFD60AL)
+          addKineticBurst(px, py, count = 8, length = 28f)
+          onSevereImpact?.invoke(14f, null)
         }
         for (rc in vb.riderConstraints) {
           rc.solve()
@@ -275,7 +311,9 @@ class RagdollSimulation(
         vb.checkEjection {
           onRiderEjected?.invoke()
           onSevereImpact?.invoke(16f, null)
+          onImpactAudio?.invoke("metallic_clang", 1.0f)
           createSparks(vb.chassisFront.x, vb.chassisFront.y, count = 12)
+          addShockwave(vb.chassisFront.x, vb.chassisFront.y, maxRadius = 65f, colorHex = 0xFFFF9500L)
         }
       }
 
@@ -283,14 +321,18 @@ class RagdollSimulation(
       var touchingGround = false
       for (p in ragdoll.particles) {
         for (t in terrain) {
-          val impact = t.collideParticle(p)
+          val impact = t.collideParticle(p, currentDilation)
           if (impact > 0.1f) {
             touchingGround = true
-            if (impact > 11f) {
-              createImpactParticles(p.x, p.y, impact)
+            val trueImpact = impact / currentDilation
+            if (trueImpact > 11f) {
+              createImpactParticles(p.x, p.y, trueImpact)
+              onImpactAudio?.invoke("thud", (trueImpact / 20f).coerceIn(0.4f, 1f))
+              addShockwave(p.x, p.y, maxRadius = (trueImpact * 3.5f).coerceIn(24f, 65f), colorHex = 0xFFFFFFFFL)
+              addKineticBurst(p.x, p.y, count = 6, length = 18f)
             }
-            if (impact > 14f) {
-              onSevereImpact?.invoke(impact, null)
+            if (trueImpact > 14f) {
+              onSevereImpact?.invoke(trueImpact, null)
             }
           }
         }
@@ -300,28 +342,38 @@ class RagdollSimulation(
       vehicleBody?.let { vb ->
         for (p in vb.particles) {
           for (t in terrain) {
-            val impact = t.collideParticle(p)
-            if (impact > 12f) {
+            val impact = t.collideParticle(p, currentDilation)
+            val trueImpact = impact / currentDilation
+            if (trueImpact > 12f) {
               createSparks(p.x, p.y, count = 8)
+              onImpactAudio?.invoke("metallic_clang", (trueImpact / 20f).coerceIn(0.3f, 1f))
+              addShockwave(p.x, p.y, maxRadius = 45f, colorHex = 0xFFCCCCCCL)
             }
-            if (impact > 18f) {
-              onSevereImpact?.invoke(impact, null)
+            if (trueImpact > 18f) {
+              onSevereImpact?.invoke(trueImpact, null)
             }
           }
         }
       }
 
-      // 7. Check Obstacle Triggers
+      // 7. Check Vehicle-Ragdoll Collisions, Run-overs and Crush Damage
+      checkVehicleRagdollCollisions(currentDilation)
+
+      // 8. Check Obstacle Triggers
       checkObstacleCollisions()
     }
+
+    // Update dynamic wheel rotation angles
+    vehicleBody?.updateWheelRotation()
 
     // Acrobatics tracking
     ragdoll.updateAcrobatics()
 
-    // Speed tracking (km/h estimate)
-    val curSpeed = max(ragdoll.averageSpeed, vehicleBody?.speed ?: 0f) * 3.6f * 4f
-    if (curSpeed > maxSpeed) {
-      maxSpeed = curSpeed
+    // Speed tracking (km/h estimate) - normalized by currentDilation for true physical speed
+    val rawSpeed = max(ragdoll.averageSpeed, vehicleBody?.speed ?: 0f) * 3.6f * 4f
+    val physicalSpeed = if (currentDilation > 0.05f) rawSpeed / currentDilation else rawSpeed
+    if (physicalSpeed > maxSpeed) {
+      maxSpeed = physicalSpeed
     }
 
     // Air time accumulation
@@ -330,12 +382,24 @@ class RagdollSimulation(
         hypot(p.x - t.x1, p.y - t.y1) < 25f || hypot(p.x - t.x2, p.y - t.y2) < 25f
       }
     }
-    if (!isTouchingAny && curSpeed > 4f) {
-      airTimeSeconds += dtSeconds
+    if (!isTouchingAny && physicalSpeed > 4f) {
+      airTimeSeconds += effectiveDt
     }
 
-    // Update visual particles
-    updateParticles(dtSeconds)
+    // Speed streaks when moving fast
+    if (physicalSpeed > 32f && Random.nextFloat() < 0.35f && speedStreaks.size < 18) {
+      speedStreaks.add(
+        SpeedStreak(
+          x = ragdoll.centerOfMassX - Random.nextFloat() * 50f,
+          y = ragdoll.centerOfMassY + (Random.nextFloat() - 0.5f) * 36f,
+          length = (physicalSpeed * 1.6f).coerceIn(28f, 95f),
+          speed = physicalSpeed * 0.4f
+        )
+      )
+    }
+
+    // Update all visual particles, shockwaves and burst lines
+    updateVisualEffects(effectiveDt)
 
     // Continuously follow stickman smoothly
     val targetX = ragdoll.centerOfMassX
@@ -344,7 +408,9 @@ class RagdollSimulation(
     cameraY += (targetY - cameraY) * 0.18f
 
     // Check completion (settled down or time threshold)
-    if (simulationTimeSeconds > 2.0f && curSpeed < 0.6f && !isFinished) {
+    // Never finish while slow motion is active, and test true physical speed
+    val isSlowMo = currentDilation < 0.90f
+    if (simulationTimeSeconds > 2.0f && physicalSpeed < 0.6f && !isFinished && !isSlowMo) {
       isFinished = true
     }
   }
@@ -372,31 +438,41 @@ class RagdollSimulation(
           ObstacleType.LANDMINE -> {
             applyExplosion(obsX, obsY, obs.type.explosionForce, radius = 90f)
             createExplosionEffect(obsX, obsY, isBig = false)
+            onImpactAudio?.invoke("explosion", 0.9f)
+            addShockwave(obsX, obsY, maxRadius = 120f, colorHex = 0xFFFF9500L)
+            addKineticBurst(obsX, obsY, count = 14, length = 45f)
           }
           ObstacleType.TNT_BARREL -> {
             applyExplosion(obsX, obsY, obs.type.explosionForce, radius = 130f)
             createExplosionEffect(obsX, obsY, isBig = true)
+            onImpactAudio?.invoke("explosion", 1.0f)
+            addShockwave(obsX, obsY, maxRadius = 160f, colorHex = 0xFFFF453AL)
+            addKineticBurst(obsX, obsY, count = 20, length = 55f)
           }
           ObstacleType.BRICK_WALL -> {
-            // High resistance impact
             ragdoll.applyImpulse(-15f, -6f)
             vehicleBody?.applyImpulse(-25f, -8f)
             createBrickDebris(obsX, obsY)
+            onImpactAudio?.invoke("thud", 1.0f)
+            addShockwave(obsX, obsY, maxRadius = 80f, colorHex = 0xFFD2691EL)
           }
           ObstacleType.TURBO_PAD -> {
-            // Forward rocket boost
             ragdoll.applyImpulse(28f, -4f)
             vehicleBody?.applyImpulse(38f, -6f)
             createTurboStreak(obsX, obsY)
+            onImpactAudio?.invoke("whoosh", 1.0f)
+            addShockwave(obsX, obsY, maxRadius = 70f, colorHex = 0xFF0A84FFL)
           }
           ObstacleType.PINBALL_BUMPER -> {
-            // High velocity elastic bounce
             val dirX = (checkX - obsX)
             val dirY = (checkY - obsY)
             val len = max(1f, hypot(dirX, dirY))
             ragdoll.applyImpulse((dirX / len) * 32f, (dirY / len) * 32f)
             vehicleBody?.applyImpulse((dirX / len) * 35f, (dirY / len) * 35f)
             createSparks(obsX, obsY, count = 20)
+            onImpactAudio?.invoke("whoosh", 1.0f)
+            addShockwave(obsX, obsY, maxRadius = 85f, colorHex = 0xFFFFD60AL)
+            addKineticBurst(obsX, obsY, count = 12, length = 35f)
           }
         }
       }
@@ -549,6 +625,69 @@ class RagdollSimulation(
     }
   }
 
+  fun addShockwave(x: Float, y: Float, maxRadius: Float = 60f, colorHex: Long = 0xFFFFFFFFL) {
+    if (shockwaves.size < 25) {
+      shockwaves.add(Shockwave(x = x, y = y, radius = 6f, maxRadius = maxRadius, colorHex = colorHex))
+    }
+  }
+
+  fun addKineticBurst(x: Float, y: Float, count: Int = 8, length: Float = 24f) {
+    if (kineticBursts.size < 40) {
+      for (i in 0 until count) {
+        val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
+        val dist = Random.nextFloat() * 8f + 6f
+        val lineLen = Random.nextFloat() * length * 0.5f + length * 0.5f
+        kineticBursts.add(
+          KineticBurstLine(
+            startX = x + (cos(angle) * dist),
+            startY = y + (sin(angle) * dist),
+            endX = x + (cos(angle) * (dist + lineLen)),
+            endY = y + (sin(angle) * (dist + lineLen)),
+            life = 0.35f,
+            maxLife = 0.35f
+          )
+        )
+      }
+    }
+  }
+
+  private fun updateVisualEffects(dtSeconds: Float) {
+    // 1. Update particles
+    updateParticles(dtSeconds)
+
+    // 2. Update shockwaves
+    val waveIter = shockwaves.iterator()
+    while (waveIter.hasNext()) {
+      val w = waveIter.next()
+      w.life -= dtSeconds * 2.2f
+      w.radius += (w.maxRadius - w.radius) * 0.22f
+      if (w.life <= 0f) {
+        waveIter.remove()
+      }
+    }
+
+    // 3. Update kinetic burst lines
+    val burstIter = kineticBursts.iterator()
+    while (burstIter.hasNext()) {
+      val b = burstIter.next()
+      b.life -= dtSeconds * 3.0f
+      if (b.life <= 0f) {
+        burstIter.remove()
+      }
+    }
+
+    // 4. Update speed streaks
+    val streakIter = speedStreaks.iterator()
+    while (streakIter.hasNext()) {
+      val s = streakIter.next()
+      s.life -= dtSeconds * 3.0f
+      s.x -= s.speed * dtSeconds * 32f
+      if (s.life <= 0f) {
+        streakIter.remove()
+      }
+    }
+  }
+
   private fun updateParticles(dtSeconds: Float) {
     val iter = particles.iterator()
     while (iter.hasNext()) {
@@ -561,6 +700,138 @@ class RagdollSimulation(
         p.y += p.vy
         p.vy += gravity * 0.4f
       }
+    }
+  }
+
+  private fun checkVehicleRagdollCollisions(currentDilation: Float) {
+    val vb = vehicleBody ?: return
+    if (vehicle.wheelCount == 0) return
+
+    val vehicleParts = vb.particles
+    val isEjected = vb.isRiderEjected
+
+    // 1. If rider is still in vehicle: check roof rollover crush on head/neck
+    if (!isEjected) {
+      val isRolledOver = vb.chassisTop.y > vb.chassisSeat.y - 4f
+      val headNearGround = terrain.any { t ->
+        val px = ragdoll.head.x - t.x1
+        val py = ragdoll.head.y - t.y1
+        val proj = max(0f, min(t.length, px * t.dirX + py * t.dirY))
+        val cx = t.x1 + t.dirX * proj
+        val cy = t.y1 + t.dirY * proj
+        hypot(ragdoll.head.x - cx, ragdoll.head.y - cy) < (ragdoll.head.radius + 10f)
+      }
+
+      if (isRolledOver && headNearGround) {
+        val rolloverImpact = (vb.speed / currentDilation) * 1.8f + 14f
+        if (rolloverImpact > 11f) {
+          ragdoll.breakBone(BoneType.CRANIUM, rolloverImpact)
+          ragdoll.breakBone(BoneType.CERVICAL_SPINE, rolloverImpact)
+          onBoneBroken?.invoke(BoneType.CRANIUM, rolloverImpact)
+          onBoneBroken?.invoke(BoneType.CERVICAL_SPINE, rolloverImpact)
+          onSevereImpact?.invoke(rolloverImpact, BoneType.CRANIUM)
+          onImpactAudio?.invoke("bone_crunch", 1.0f)
+          createFractureParticles(ragdoll.head.x, ragdoll.head.y)
+          addShockwave(ragdoll.head.x, ragdoll.head.y, maxRadius = 75f, colorHex = 0xFFFF3B30L)
+          addKineticBurst(ragdoll.head.x, ragdoll.head.y, count = 12, length = 35f)
+        }
+      }
+    }
+
+    // 2. Active collision between all vehicle particles and ragdoll particles
+    for (vp in vehicleParts) {
+      for (rp in ragdoll.particles) {
+        // If rider is not ejected, don't self-collide anchor joints
+        if (!isEjected) {
+          if (vp === vb.chassisSeat && (rp === ragdoll.pelvis || rp === ragdoll.chest)) continue
+          if (vp === vb.steeringCol && (rp === ragdoll.lHand || rp === ragdoll.rHand)) continue
+          if (vp === vb.chassisFloor && (rp === ragdoll.lFoot || rp === ragdoll.rFoot)) continue
+        }
+
+        val dx = rp.x - vp.x
+        val dy = rp.y - vp.y
+        val dist = hypot(dx, dy)
+        val minDist = vp.radius + rp.radius + 2.5f
+
+        if (dist < minDist && dist > 0.001f) {
+          val nx = dx / dist
+          val ny = dy / dist
+          val overlap = minDist - dist
+
+          val totalMass = vp.mass + rp.mass
+          val rRatio = vp.mass / totalMass
+          val vRatio = rp.mass / totalMass
+
+          // Positional push
+          rp.x += nx * overlap * rRatio
+          rp.y += ny * overlap * rRatio
+          vp.x -= nx * overlap * vRatio
+          vp.y -= ny * overlap * vRatio
+
+          // Relative velocity calculation
+          val relVx = rp.vx - vp.vx
+          val relVy = rp.vy - vp.vy
+          val approachSpeed = -(relVx * nx + relVy * ny)
+
+          if (approachSpeed > 0f) {
+            val restitution = 0.35f
+            val impulse = approachSpeed * (1f + restitution) * (vp.mass * rp.mass / totalMass)
+            rp.oldX -= (nx * impulse / rp.mass)
+            rp.oldY -= (ny * impulse / rp.mass)
+            vp.oldX += (nx * impulse / vp.mass)
+            vp.oldY += (ny * impulse / vp.mass)
+          }
+
+          var impactStrength = (max(0f, approachSpeed) / currentDilation) + (vp.speed / currentDilation) * 0.45f
+
+          // Ground crush check (sandwich between heavy vehicle chassis/wheel and ground)
+          val isNearGround = terrain.any { t ->
+            val px = rp.x - t.x1
+            val py = rp.y - t.y1
+            val proj = max(0f, min(t.length, px * t.dirX + py * t.dirY))
+            val cx = t.x1 + t.dirX * proj
+            val cy = t.y1 + t.dirY * proj
+            hypot(rp.x - cx, rp.y - cy) < (rp.radius + 10f)
+          }
+
+          if (isNearGround && ny > 0.25f) {
+            impactStrength += (vp.mass * 0.22f) + 8f
+          }
+
+          if (impactStrength > 7.5f) {
+            val bone = getBoneForParticle(rp)
+            bone?.let { b ->
+              ragdoll.breakBone(b, impactStrength)
+              onBoneBroken?.invoke(b, impactStrength)
+            }
+            onSevereImpact?.invoke(impactStrength, bone)
+            onImpactAudio?.invoke("bone_crunch", 1.0f)
+            onImpactAudio?.invoke("metallic_clang", 0.85f)
+            createImpactParticles(rp.x, rp.y, impactStrength)
+            createSparks(vp.x, vp.y, count = 8)
+            addShockwave(rp.x, rp.y, maxRadius = (impactStrength * 3.2f).coerceIn(30f, 85f), colorHex = 0xFFFF453AL)
+            addKineticBurst(rp.x, rp.y, count = 8, length = 25f)
+          }
+        }
+      }
+    }
+  }
+
+  private fun getBoneForParticle(p: Particle): BoneType? {
+    return when {
+      p === ragdoll.head -> BoneType.CRANIUM
+      p === ragdoll.neck -> BoneType.CERVICAL_SPINE
+      p === ragdoll.chest -> BoneType.THORAX_RIBS
+      p === ragdoll.pelvis -> BoneType.PELVIS
+      p === ragdoll.lKnee || p === ragdoll.lHip -> BoneType.LEFT_FEMUR
+      p === ragdoll.lFoot -> BoneType.LEFT_TIBIA
+      p === ragdoll.rKnee || p === ragdoll.rHip -> BoneType.RIGHT_FEMUR
+      p === ragdoll.rFoot -> BoneType.RIGHT_TIBIA
+      p === ragdoll.lShoulder || p === ragdoll.lElbow -> BoneType.LEFT_HUMERUS
+      p === ragdoll.lHand -> BoneType.LEFT_FOREARM
+      p === ragdoll.rShoulder || p === ragdoll.rElbow -> BoneType.RIGHT_HUMERUS
+      p === ragdoll.rHand -> BoneType.RIGHT_FOREARM
+      else -> null
     }
   }
 

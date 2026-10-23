@@ -19,11 +19,18 @@ data class Particle(
   val vy: Float get() = y - oldY
   val speed: Float get() = hypot(vx, vy)
 
-  fun update(dt: Float, gravity: Float) {
+  fun scaleDisplacement(ratio: Float) {
+    if (isPinned) return
+    oldX = x - (x - oldX) * ratio
+    oldY = y - (y - oldY) * ratio
+  }
+
+  fun update(dt: Float, gravity: Float, timeDilation: Float = 1.0f) {
     if (isPinned) return
 
-    val velX = (x - oldX) * friction
-    val velY = (y - oldY) * friction
+    val effectiveFriction = 1.0f - (1.0f - friction) * timeDilation.coerceIn(0.15f, 1.0f)
+    val velX = (x - oldX) * effectiveFriction
+    val velY = (y - oldY) * effectiveFriction
 
     oldX = x
     oldY = y

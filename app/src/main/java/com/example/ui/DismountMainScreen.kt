@@ -66,6 +66,9 @@ fun DismountMainScreen(viewModel: GameViewModel) {
       phase = uiState.phase,
       isSlowMoActive = uiState.isSlowMoActive,
       renderTick = uiState.renderTick,
+      shakeOffsetX = uiState.shakeOffsetX,
+      shakeOffsetY = uiState.shakeOffsetY,
+      shakeAngle = uiState.shakeAngle,
       onStickmanClicked = { viewModel.cyclePushJoint() },
       modifier = Modifier.fillMaxSize()
     )

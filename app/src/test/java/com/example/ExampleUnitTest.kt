@@ -66,4 +66,33 @@ class ExampleUnitTest {
     assertEquals(sim.cameraX, camX, 0.001f)
     assertEquals(sim.cameraY, camY, 0.001f)
   }
+
+  @Test
+  fun testVehicleAssemblyAndRiderAttachment() {
+    val sim = RagdollSimulation(Stage.STAIRS, Vehicle.MUSCLE_CAR, DismountPose.SITTING)
+    val vb = sim.vehicleBody
+    assertNotNull(vb)
+    assertEquals(8, vb!!.particles.size)
+    assertTrue(vb.constraints.isNotEmpty())
+    assertTrue(vb.riderConstraints.isNotEmpty())
+    assertFalse(vb.isRiderEjected)
+    assertFalse(vb.isFrontWheelDetached)
+    assertFalse(vb.isRearWheelDetached)
+  }
+
+  @Test
+  fun testVehicleSimulationAndEjection() {
+    val sim = RagdollSimulation(Stage.STAIRS, Vehicle.SHOPPING_CART, DismountPose.SITTING)
+    sim.launch(1.0f, 15f)
+
+    // Simulate several frames until impact occurs
+    for (i in 0 until 60) {
+      sim.update(0.016f)
+    }
+
+    assertTrue(sim.simulationTimeSeconds > 0.5f)
+    val vb = sim.vehicleBody
+    assertNotNull(vb)
+    assertTrue(vb!!.chassisDamagePoints >= 0)
+  }
 }

@@ -21,7 +21,7 @@ data class TerrainSegment(
   val normX: Float = -dirY
   val normY: Float = dirX
 
-  fun collideParticle(particle: Particle): Float {
+  fun collideParticle(particle: Particle, timeDilation: Float = 1.0f): Float {
     if (length < 0.001f) return 0f
 
     // Vector from p1 to particle
@@ -56,7 +56,9 @@ data class TerrainSegment(
         val impactForce = -vNormal
 
         val newVNormal = -vNormal * restitution
-        val newVTangent = vTangent * friction
+        // Scale sliding friction smoothly with timeDilation so slow motion preserves momentum
+        val effectiveFriction = 1.0f - (1.0f - friction) * timeDilation.coerceIn(0.15f, 1.0f)
+        val newVTangent = vTangent * effectiveFriction
 
         val finalVx = newVTangent * (-ny) + newVNormal * nx
         val finalVy = newVTangent * nx + newVNormal * ny
